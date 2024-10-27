@@ -1,0 +1,175 @@
+version: '3.8'
+
+services:
+  kafka:
+    image: &kafka-image bitnami/kafka:latest
+    restart: on-failure
+    ports:
+      - 9092:9092  # Porta interna para o listener INT
+      - 9093:9093  # Porta externa para o listener EXT
+    environment:
+      - KAFKA_CFG_BROKER_ID=1
+      - KAFKA_CFG_LISTENERS=INT://0.0.0.0:9092,EXT://0.0.0.0:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=INT://kafka:9092,EXT://localhost:9093
+      - KAFKA_ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - KAFKA_CFG_NUM_PARTITIONS=3
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=INT:PLAINTEXT,EXT:PLAINTEXT
+      - KAFKA_INTER_BROKER_LISTENER_NAME=INT
+    depends_on:
+      - zookeeper
+    healthcheck:
+      test: [ "CMD-SHELL", "kafka-topics.sh --bootstrap-server kafka:9092 --list" ]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  zookeeper:
+    image: bitnami/zookeeper:latest
+    ports:
+      - 2181:2181
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+
+  init-kafka:
+    image: *kafka-image
+    working_dir: /opt/bitnami/kafka/bin
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+      # blocks until kafka is reachable
+      kafka-topics.sh --bootstrap-server kafka:9092 --list
+      echo -e 'Creating kafka topics'
+      kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic user_events --replication-factor 1 --partitions 1
+      kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic __connect_configs --replication-factor 1 --partitions 1 --config cleanup.policy=compact
+      kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic __connect_offsets --replication-factor 1 --partitions 1 --config cleanup.policy=compact
+      kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic __connect_statuses --replication-factor 1 --partitions 1 --config cleanup.policy=compact
+
+      echo -e 'Successfully created the following topics:'
+      kafka-topics.sh --bootstrap-server kafka:9092 --list
+      "
+
+  ksql-server:
+    image: confluentinc/ksqldb-server:latest
+    ports:
+      - 8088:8088
+    environment:
+      - KSQL_CONFIG_DIR=/etc/ksqldb
+      - KSQL_BOOTSTRAP_SERVERS=kafka:9092
+      - KSQL_LISTENERS=http://0.0.0.0:8088
+      - KSQL_KSQL_SERVICE_ID=ksql_service
+      - KSQL_KSQL_SCHEMA_REGISTRY_URL=http://schema-registry:8081
+    depends_on:
+      - kafka
+      - zookeeper
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8088/info"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:latest
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:9092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_DEBUG: true
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+    depends_on:
+      - kafka
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:8081/subjects"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+  
+  kafka-connect:
+    image: confluentinc/cp-kafka-connect:latest
+    ports:
+      - 8083:8083
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:9092
+      CONNECT_GROUP_ID: s3-sink
+      CONNECT_CONFIG_STORAGE_TOPIC: __connect_configs
+      CONNECT_STATUS_STORAGE_TOPIC: __connect_statuses
+      CONNECT_OFFSET_STORAGE_TOPIC: __connect_offsets
+
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+
+      CONNECT_REST_PORT: 8083
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_ZOOKEEPER_CONNECT: zookeeper:2181
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    depends_on:
+      init-kafka:
+        condition: service_completed_successfully
+    volumes:
+      - ./s3-plugin:/usr/share/java/kafka-connect-s3
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://kafka-connect:8083/connectors" ]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+      - zookeeper
+      - ksql-server
+      - kafka-connect
+    ports:
+      - "8080:8080"
+    restart: always
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+      KAFKA_CLUSTERS_0_KSQLDBSERVER: http://ksql-server:8088
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: local
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
+      DYNAMIC_CONFIG_ENABLED: "true"
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+
+  init-kafka-schema-connector:
+    image: *kafka-image
+    working_dir: /opt/bitnami/kafka/bin
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      ksql-server:
+        condition: service_healthy
+    volumes:
+      - ./setup-connectors.sh:/setup-connectors.sh
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+        # blocks until kafka-connect is reachable
+        curl -f http://kafka-connect:8083/connectors
+        echo -e 'Creating kafka connectors'
+        chmod +x /setup-connectors.sh
+        /setup-connectors.sh
+      "
+
+  producer:
+    build:
+      context: ./producer
+    depends_on:
+      init-kafka-schema-connector:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      PRODUCER_RPM: 10000
+      PRODUCER_ENABLED: true
