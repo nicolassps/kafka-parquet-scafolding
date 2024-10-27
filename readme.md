@@ -6,6 +6,22 @@ Este projeto tem como objetivo criar um ambiente de desenvolvimento para trabalh
 
 Se trata de um scafolding para quem quer iniciar com a stack, há varias configurações de segurança adicional que podem ser feitas, como por exemplo, a utilização de SSL para comunicação entre os serviços.
 
+## Variáveis de Ambiente
+
+Antes de executar o `docker-compose`, é necessário configurar as seguintes variáveis de ambiente para autenticação com a AWS:
+
+- `AWS_ACCESS_KEY_ID`: Sua chave de acesso da AWS.
+- `AWS_SECRET_ACCESS_KEY`: Sua chave secreta da AWS.
+
+### Exemplo de Configuração
+
+Você pode definir essas variáveis em seu terminal ou em um arquivo `.env` na raiz do seu projeto. Aqui está um exemplo de como definir as variáveis no terminal:
+
+```bash
+export AWS_ACCESS_KEY_ID=seu_access_key_id
+export AWS_SECRET_ACCESS_KEY=seu_secret_access_key
+```
+
 ## Como Usar
 
 1. **Iniciar os serviços:**
